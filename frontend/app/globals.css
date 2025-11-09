@@ -1,0 +1,135 @@
+@import "tailwindcss";
+
+:root {
+  /* Light Mode - White background with Green containers */
+  --background: #FFFFFF;
+  --foreground: #1E1E1E;
+  --card-bg: #204E3A;              /* Financr green for containers */
+  --card-text: #FFFFFF;            /* White text on green containers */
+  --border: #3B6B4C;               /* Green borders */
+  --sidebar-bg: #E8F5F0;           /* Soft green sidebar */
+  --primary: #204E3A;
+  --primary-hover: #2a6449;
+  --primary-light: #3B6B4C;
+  --primary-dark: #163828;
+  --surface: #204E3A;              /* Green surface */
+  --text-light: #1E1E1E;           /* Dark text for main background */
+  --text-dark: #FFFFFF;            /* White text for containers */
+  --border-light: #3B6B4C;
+  --border-dark: #2A2F2C;
+}
+
+.dark {
+  /* Dark Mode - Deep Navy/Charcoal with dark containers */
+  --background: #0F1210;           /* Deep navy background */
+  --foreground: #E8EDE9;           /* Light text */
+  --card-bg: #1A1F1C;              /* Dark containers */
+  --card-text: #E8EDE9;            /* Light text on dark containers */
+  --border: #2A2F2C;               /* Subtle borders */
+  --sidebar-bg: #0A0D0B;           /* Darker sidebar */
+  --primary-hover: #3B6B4C;
+  --surface: #1A1F1C;              /* Dark surface */
+  --text-light: #1E1E1E;
+  --text-dark: #E8EDE9;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-light: var(--primary-light);
+  --color-primary-dark: var(--primary-dark);
+  --color-surface: var(--surface);
+  --color-card-bg: var(--card-bg);
+  --color-card-text: var(--card-text);
+  --color-border: var(--border);
+  --color-sidebar-bg: var(--sidebar-bg);
+  --color-surface-light: #204E3A;
+  --color-surface-dark: #1A1F1C;
+  --color-text-light: #1E1E1E;
+  --color-text-dark: #E8EDE9;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overscroll-behavior: none;
+  overflow-x: hidden;
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+  overflow-x: hidden;
+}
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #204E3A;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2a6449;
+}
+
+/* Improved touch interactions */
+button, a {
+  touch-action: manipulation;
+  user-select: none;
+}
+
+/* Loading shimmer animation */
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.skeleton {
+  animation: shimmer 2s infinite linear;
+  background: linear-gradient(
+    to right,
+    #f1f5f9 0%,
+    #e2e8f0 20%,
+    #f1f5f9 40%,
+    #f1f5f9 100%
+  );
+  background-size: 1000px 100%;
+}
+
+/* Subtle pulse for important elements */
+@keyframes pulse-slow {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

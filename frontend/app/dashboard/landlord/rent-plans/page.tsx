@@ -1,0 +1,233 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
+import { Button, Alert } from '@/components/UIComponents';
+import { CreateRentPlanModal } from '@/components/CreateRentPlanModal';
+import { rentPlansApi } from '@/lib/api';
+import { formatCurrency, formatDate, getStatusColor } from '@/lib/utils';
+import { Plus, X, FileText, Calendar, DollarSign, Clock } from 'lucide-react';
+
+export default function LandlordRentPlansPage() {
+  const { user } = useAuth();
+  const [rentPlans, setRentPlans] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [alert, setAlert] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [processingPlanId, setProcessingPlanId] = useState<string | null>(null);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+
+  useEffect(() => {
+    loadData();
+  }, [user]);
+
+  const loadData = async () => {
+    if (!user) return;
+    
+    try {
+      setIsLoading(true);
+      const plansData = await rentPlansApi.getLandlordPlans();
+      setRentPlans(plansData as any[]);
+    } catch (error) {
+      console.error('Error loading data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handlePlanCreated = () => {
+    setAlert({
+      type: 'success',
+      message: 'Rent plan created and sent to tenant successfully!',
+    });
+    loadData();
+  };
+
+  const handleCancelPlan = async (planId: string) => {
+    if (!confirm('Are you sure you want to cancel this rent plan?')) return;
+
+    setProcessingPlanId(planId);
+    setAlert(null);
+
+    try {
+      await rentPlansApi.cancelPlan(planId);
+      setAlert({
+        type: 'success',
+        message: 'Rent plan cancelled successfully!',
+      });
+      loadData();
+    } catch (error: any) {
+      setAlert({
+        type: 'error',
+        message: error.message || 'Failed to cancel rent plan',
+      });
+    } finally {
+      setProcessingPlanId(null);
+    }
+  };
+
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="animate-pulse">
+          <div className="text-lg font-semibold text-gray-600 dark:text-gray-400">Loading rent plans...</div>
+        </div>
+      </div>
+    );
+  }
+
+  const pendingPlans = rentPlans.filter((p) => p.status === 'pending');
+  const acceptedPlans = rentPlans.filter((p) => p.status === 'accepted');
+  const completedPlans = rentPlans.filter((p) => p.status === 'completed');
+  const rejectedPlans = rentPlans.filter((p) => p.status === 'rejected');
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-white">Rent Plans</h1>
+          <p className="text-gray-300 mt-1">
+            Create and manage rent plans for your tenants
+          </p>
+        </div>
+        <Button onClick={() => setIsCreateModalOpen(true)} variant="primary">
+          <Plus className="w-5 h-5" />
+          Create Rent Plan
+        </Button>
+      </div>
+
+      {/* Alert */}
+      {alert && (
+        <Alert
+          type={alert.type}
+          message={alert.message}
+          onClose={() => setAlert(null)}
+        />
+      )}
+
+      {/* Summary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-gray-800 dark:bg-gray-900 border border-yellow-700 rounded-xl p-5">
+          <p className="text-sm font-semibold text-yellow-300">Pending Response</p>
+          <p className="text-4xl font-bold text-yellow-400 mt-2">{pendingPlans.length}</p>
+        </div>
+        <div className="bg-gray-800 dark:bg-gray-900 border border-blue-700 rounded-xl p-5">
+          <p className="text-sm font-semibold text-blue-300">Awaiting Payment</p>
+          <p className="text-4xl font-bold text-blue-400 mt-2">{acceptedPlans.length}</p>
+        </div>
+        <div className="bg-gray-800 dark:bg-gray-900 border border-green-700 rounded-xl p-5">
+          <p className="text-sm font-semibold text-green-300">Completed</p>
+          <p className="text-4xl font-bold text-green-400 mt-2">{completedPlans.length}</p>
+        </div>
+        <div className="bg-gray-800 dark:bg-gray-900 border border-red-700 rounded-xl p-5">
+          <p className="text-sm font-semibold text-red-300">Rejected</p>
+          <p className="text-4xl font-bold text-red-400 mt-2">{rejectedPlans.length}</p>
+        </div>
+      </div>
+
+      {/* All Plans */}
+      <div className="bg-gray-800 dark:bg-gray-900 rounded-2xl border border-gray-700 dark:border-gray-800 p-6 shadow-lg">
+        <h2 className="text-xl font-bold text-white mb-6">All Rent Plans</h2>
+        {rentPlans.length === 0 ? (
+          <div className="text-center py-12">
+            <FileText className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+            <p className="text-gray-400 text-lg">No rent plans yet</p>
+            <p className="text-gray-500 text-sm mt-2">
+              Create your first rent plan to get started
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {rentPlans.map((plan) => (
+              <div
+                key={plan.id}
+                className="p-5 border border-gray-700 rounded-xl hover:shadow-md transition-shadow bg-gray-900 hover:border-gray-600"
+              >
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-3 mb-2">
+                      <h3 className="font-bold text-lg text-white">
+                        {plan.tenant?.name || `Tenant: ${plan.tenantId}`}
+                      </h3>
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-semibold ${getStatusColor(
+                          plan.status
+                        )}`}
+                      >
+                        {plan.status.charAt(0).toUpperCase() + plan.status.slice(1)}
+                      </span>
+                    </div>
+                    {plan.tenant?.email && (
+                      <p className="text-sm text-gray-400">{plan.tenant.email}</p>
+                    )}
+                    {plan.description && (
+                      <p className="text-sm text-gray-400 mt-2">{plan.description}</p>
+                    )}
+                  </div>
+                  {plan.status === 'pending' && (
+                    <Button
+                      onClick={() => handleCancelPlan(plan.id)}
+                      disabled={processingPlanId === plan.id}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      <X className="w-4 h-4" />
+                      {processingPlanId === plan.id ? 'Cancelling...' : 'Cancel'}
+                    </Button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 text-green-400" />
+                    <div>
+                      <p className="text-xs text-gray-400">Monthly Rent</p>
+                      <p className="text-lg font-bold text-white">
+                        {formatCurrency(plan.monthlyRent)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 text-blue-400" />
+                    <div>
+                      <p className="text-xs text-gray-400">Deposit</p>
+                      <p className="text-lg font-bold text-white">
+                        {formatCurrency(plan.deposit)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-purple-400" />
+                    <div>
+                      <p className="text-xs text-gray-400">Duration</p>
+                      <p className="text-lg font-bold text-white">
+                        {plan.duration} months
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Calendar className="w-5 h-5 text-orange-400" />
+                    <div>
+                      <p className="text-xs text-gray-400">Proposed</p>
+                      <p className="text-sm font-semibold text-white">
+                        {formatDate(plan.proposedDate)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Create Rent Plan Modal with Username Search */}
+      <CreateRentPlanModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onSuccess={handlePlanCreated}
+      />
+    </div>
+  );
+}

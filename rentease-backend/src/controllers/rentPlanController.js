@@ -1,0 +1,513 @@
+import prisma from '../config/db.js';
+import { stripe } from '../config/stripe.js';
+import { asyncHandler } from '../utils/errorHandler.js';
+import { sendPDFForSigning } from '../utils/docuseal.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Get all rent plans for current user
+export const getRentPlans = asyncHandler(async (req, res) => {
+    const where = req.user.role === 'tenant'
+        ? { tenantId: req.user.id }
+        : { landlordId: req.user.id };
+
+    const plans = await prisma.rentPlan.findMany({
+        where,
+        include: {
+            tenant: {
+                select: { id: true, name: true, email: true },
+            },
+            landlord: {
+                select: { id: true, name: true, email: true },
+            },
+        },
+        orderBy: { createdAt: 'desc' },
+    });
+
+    res.json({ plans });
+});
+
+// Landlord creates a new rent plan for a tenant
+export const createRentPlan = asyncHandler(async (req, res) => {
+    if (req.user.role !== 'landlord') {
+        const error = new Error('Only landlords can create rent plans');
+        error.status = 403;
+        throw error;
+    }
+
+    const { tenantId, tenantUsername, monthlyRent, deposit, duration, description, startDate } = req.body;
+
+    // Validation - accept either tenantId or tenantUsername
+    if ((!tenantId && !tenantUsername) || !monthlyRent || !deposit || !duration) {
+        const error = new Error('Missing required fields: (tenantId or tenantUsername), monthlyRent, deposit, duration');
+        error.status = 400;
+        throw error;
+    }
+
+    const monthlyRentValue = Number(monthlyRent);
+    const depositValue = Number(deposit);
+    const durationValue = Number(duration);
+
+    if ([monthlyRentValue, depositValue, durationValue].some((value) => Number.isNaN(value) || value <= 0)) {
+        const error = new Error('Invalid values: monthlyRent, deposit, and duration must be positive numbers');
+        error.status = 400;
+        throw error;
+    }
+
+    // Find tenant by username or ID
+    const whereClause = tenantUsername 
+        ? { username: tenantUsername, role: 'tenant' }
+        : { id: tenantId, role: 'tenant' };
+
+    const tenant = await prisma.user.findFirst({
+        where: whereClause,
+    });
+
+    if (!tenant) {
+        const error = new Error(tenantUsername ? `Tenant with username "${tenantUsername}" not found` : 'Tenant not found');
+        error.status = 404;
+        throw error;
+    }
+
+    // Create the rent plan
+    const plan = await prisma.rentPlan.create({
+        data: {
+            tenantId: tenant.id,
+            landlordId: req.user.id,
+        monthlyRent: monthlyRentValue,
+        deposit: depositValue,
+        duration: durationValue,
+            description: description || null,
+            startDate: startDate ? new Date(startDate) : null,
+            status: 'pending',
+        },
+        include: {
+            tenant: {
+                select: { id: true, name: true, email: true, username: true },
+            },
+            landlord: {
+                select: { id: true, name: true, email: true, username: true },
+            },
+        },
+    });
+
+    // Send tenancy agreement PDF for signing via DocuSeal
+    try {
+        console.log('📄 Sending tenancy agreement PDF to tenant for signing...');
+        
+        // Read the tenan.pdf file
+        const pdfPath = path.join(__dirname, '../../tenan.pdf');
+        
+        if (!fs.existsSync(pdfPath)) {
+            console.warn('⚠️ tenan.pdf not found, skipping DocuSeal integration');
+        } else {
+            const pdfBuffer = fs.readFileSync(pdfPath);
+            
+            // Send PDF for signing
+            const docusealResult = await sendPDFForSigning(
+                pdfBuffer,
+                tenant.email,
+                tenant.name,
+                `Tenancy Agreement - ${req.user.name}`
+            );
+            
+            // Update plan with DocuSeal details
+            await prisma.rentPlan.update({
+                where: { id: plan.id },
+                data: {
+                    docusealSubmissionId: docusealResult.submissionId,
+                    docusealSubmitterId: docusealResult.submitterId,
+                    docusealSigningUrl: docusealResult.signingUrl,
+                    docusealStatus: 'pending',
+                },
+            });
+            
+            console.log('✅ Tenancy agreement sent to tenant via DocuSeal');
+            console.log(`📧 Signing email sent to: ${tenant.email}`);
+            
+            // Include DocuSeal info in response
+            plan.docusealSubmissionId = docusealResult.submissionId;
+            plan.docusealSigningUrl = docusealResult.signingUrl;
+            plan.docusealStatus = 'pending';
+        }
+    } catch (error) {
+        console.error('❌ Error sending PDF via DocuSeal:', error.message);
+        // Don't fail the rent plan creation if DocuSeal fails
+        // Just log the error and continue
+    }
+
+    res.status(201).json({ plan });
+});
+
+// Get pending rent plans for current tenant
+export const getPendingPlans = asyncHandler(async (req, res) => {
+    if (req.user.role !== 'tenant') {
+        const error = new Error('Only tenants can view pending plans');
+        error.status = 403;
+        throw error;
+    }
+
+    const plans = await prisma.rentPlan.findMany({
+        where: {
+            tenantId: req.user.id,
+            status: 'pending',
+        },
+        include: {
+            landlord: {
+                select: { id: true, name: true, email: true, username: true },
+            },
+        },
+        orderBy: { proposedDate: 'desc' },
+    });
+
+    res.json({ plans });
+});
+
+// Tenant accepts a rent plan and initiates Stripe payment
+export const acceptRentPlan = asyncHandler(async (req, res) => {
+    if (req.user.role !== 'tenant') {
+        const error = new Error('Only tenants can accept rent plans');
+        error.status = 403;
+        throw error;
+    }
+
+    const { planId } = req.params;
+
+    // Find the plan
+    const plan = await prisma.rentPlan.findUnique({
+        where: { id: planId },
+        include: {
+            tenant: true,
+            landlord: true,
+        },
+    });
+
+    if (!plan) {
+        const error = new Error('Rent plan not found');
+        error.status = 404;
+        throw error;
+    }
+
+    if (plan.tenantId !== req.user.id) {
+        const error = new Error('Unauthorized: This plan is not for you');
+        error.status = 403;
+        throw error;
+    }
+
+    if (plan.status !== 'pending') {
+        const error = new Error(`Cannot accept plan with status: ${plan.status}`);
+        error.status = 400;
+        throw error;
+    }
+
+    // Create Stripe Checkout Session
+    const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        mode: 'payment',
+        line_items: [
+            {
+                price_data: {
+                    currency: 'usd',
+                    unit_amount: Math.round(plan.deposit * 100), // Convert to cents
+                    product_data: {
+                        name: `Rent Plan Deposit - ${plan.landlord.name}`,
+                        description: `Deposit for ${plan.duration} month rental plan. Monthly rent: $${plan.monthlyRent}`,
+                    },
+                },
+                quantity: 1,
+            },
+        ],
+        metadata: {
+            rentPlanId: plan.id,
+            tenantId: plan.tenantId,
+            landlordId: plan.landlordId,
+        },
+        success_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard/tenant/rent-plan?success=true&planId=${plan.id}`,
+        cancel_url: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard/tenant/rent-plan?cancelled=true`,
+    });
+
+    // Update plan with session ID and mark as accepted
+    // Also link tenant to landlord immediately (so they show up in tenant list)
+    await Promise.all([
+        prisma.rentPlan.update({
+            where: { id: planId },
+            data: {
+                status: 'accepted',
+                stripeSessionId: session.id,
+                acceptedAt: new Date(),
+                reviewedDate: new Date(),
+            },
+        }),
+        // Link tenant to landlord if not already linked
+        plan.tenant.landlordId ? Promise.resolve() : prisma.user.update({
+            where: { id: plan.tenantId },
+            data: { landlordId: plan.landlordId },
+        }),
+    ]);
+
+    console.log(`✅ Tenant ${plan.tenant.username} linked to landlord ${plan.landlord.username}`);
+
+    res.json({ 
+        sessionUrl: session.url,
+        sessionId: session.id,
+    });
+});
+
+// Tenant rejects a rent plan
+export const rejectRentPlan = asyncHandler(async (req, res) => {
+    if (req.user.role !== 'tenant') {
+        const error = new Error('Only tenants can reject rent plans');
+        error.status = 403;
+        throw error;
+    }
+
+    const { planId } = req.params;
+
+    const plan = await prisma.rentPlan.findUnique({
+        where: { id: planId },
+    });
+
+    if (!plan) {
+        const error = new Error('Rent plan not found');
+        error.status = 404;
+        throw error;
+    }
+
+    if (plan.tenantId !== req.user.id) {
+        const error = new Error('Unauthorized');
+        error.status = 403;
+        throw error;
+    }
+
+    if (plan.status !== 'pending') {
+        const error = new Error(`Cannot reject plan with status: ${plan.status}`);
+        error.status = 400;
+        throw error;
+    }
+
+    const updatedPlan = await prisma.rentPlan.update({
+        where: { id: planId },
+        data: {
+            status: 'rejected',
+            reviewedDate: new Date(),
+        },
+        include: {
+            tenant: {
+                select: { id: true, name: true, email: true },
+            },
+            landlord: {
+                select: { id: true, name: true, email: true },
+            },
+        },
+    });
+
+    res.json({ plan: updatedPlan });
+});
+
+// Stripe webhook handler
+export const handleStripeWebhook = asyncHandler(async (req, res) => {
+    console.log('🎯 Stripe webhook received');
+    
+    const sig = req.headers['stripe-signature'];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    let event;
+
+    // If webhook secret is configured, verify signature
+    if (webhookSecret && sig) {
+        try {
+            event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+            console.log(`✅ Webhook signature verified. Event type: ${event.type}`);
+        } catch (err) {
+            console.error('❌ Webhook signature verification failed:', err.message);
+            return res.status(400).send(`Webhook Error: ${err.message}`);
+        }
+    } else {
+        // Development mode: accept webhook without signature verification
+        console.warn('⚠️ Webhook signature verification skipped (no STRIPE_WEBHOOK_SECRET or signature)');
+        event = req.body;
+    }
+
+    // Handle the event
+    if (event.type === 'checkout.session.completed') {
+        console.log('💳 Processing checkout.session.completed event');
+        const session = event.data.object;
+
+        // Get IDs from metadata
+        const rentPlanId = session.metadata.rentPlanId;
+        const billId = session.metadata.billId;
+        
+        console.log(`📋 Metadata: rentPlanId=${rentPlanId}, billId=${billId}`);
+
+        // Handle rent plan payment
+        if (rentPlanId) {
+            try {
+                // Get the rent plan with tenant and landlord info
+                const plan = await prisma.rentPlan.findUnique({
+                    where: { id: rentPlanId },
+                    include: { tenant: true, landlord: true },
+                });
+
+                if (plan) {
+                    // Calculate next due date (1 month from start date or now)
+                    const startDate = plan.startDate || new Date();
+                    const nextDueDate = new Date(startDate);
+                    nextDueDate.setMonth(nextDueDate.getMonth() + 1);
+
+                    // Update the rent plan to completed
+                    await prisma.rentPlan.update({
+                        where: { id: rentPlanId },
+                        data: {
+                            status: 'completed',
+                            paymentIntentId: session.payment_intent,
+                            completedDate: new Date(),
+                            nextDueDate: nextDueDate,
+                        },
+                    });
+
+                    // Link tenant to landlord if not already linked
+                    if (!plan.tenant.landlordId) {
+                        await prisma.user.update({
+                            where: { id: plan.tenantId },
+                            data: {
+                                landlordId: plan.landlordId,
+                            },
+                        });
+                        console.log(`✅ Tenant ${plan.tenant.username} linked to landlord ${plan.landlord.username}`);
+                    }
+
+                    console.log(`✅ Rent plan ${rentPlanId} marked as completed with next due date: ${nextDueDate.toISOString()}`);
+                }
+            } catch (error) {
+                console.error(`Error updating rent plan ${rentPlanId}:`, error);
+            }
+        }
+
+        // Handle bill payment
+        if (billId) {
+            try {
+                console.log(`🔔 Processing bill payment for bill ID: ${billId}`);
+                
+                const bill = await prisma.bill.findUnique({
+                    where: { id: billId },
+                    include: { tenant: true },
+                });
+
+                if (!bill) {
+                    console.error(`❌ Bill ${billId} not found in database`);
+                    return;
+                }
+
+                if (bill.isPaid) {
+                    console.log(`⚠️ Bill ${billId} already marked as paid, skipping`);
+                    return;
+                }
+
+                console.log(`📝 Bill details: ${JSON.stringify({ id: bill.id, amount: bill.amount, dueDate: bill.dueDate, tenantId: bill.tenantId })}`);
+
+                const paidDate = new Date();
+                const isOnTime = paidDate <= bill.dueDate;
+                const pointsEarned = isOnTime ? Math.max(0, Math.round(bill.amount * 0.1)) : 0;
+
+                console.log(`💰 Payment details: paidDate=${paidDate.toISOString()}, isOnTime=${isOnTime}, pointsEarned=${pointsEarned}`);
+
+                const operations = [
+                    prisma.bill.update({
+                        where: { id: billId },
+                        data: {
+                            isPaid: true,
+                            paidDate,
+                        },
+                    }),
+                ];
+
+                if (pointsEarned > 0) {
+                    operations.push(
+                        prisma.reward.create({
+                            data: {
+                                tenantId: bill.tenantId,
+                                billId: bill.id,
+                                amount: bill.amount,
+                                date: paidDate,
+                                isOnTime,
+                                pointsEarned,
+                            },
+                        }),
+                        prisma.user.update({
+                            where: { id: bill.tenantId },
+                            data: {
+                                points: {
+                                    increment: pointsEarned,
+                                },
+                            },
+                        }),
+                    );
+                }
+
+                await prisma.$transaction(operations);
+
+                console.log(`✅ Bill ${billId} successfully marked as paid. Points earned: ${pointsEarned}`);
+                console.info(`Bill updated to PAID: ${billId}`);
+            } catch (error) {
+                console.error(`❌ Error updating bill ${billId}:`, error);
+                console.error('Full error stack:', error.stack);
+            }
+        }
+    }
+
+    res.json({ received: true });
+});
+
+// Landlord cancels a rent plan (only if pending)
+export const cancelRentPlan = asyncHandler(async (req, res) => {
+    if (req.user.role !== 'landlord') {
+        const error = new Error('Only landlords can cancel rent plans');
+        error.status = 403;
+        throw error;
+    }
+
+    const { planId } = req.params;
+
+    const plan = await prisma.rentPlan.findUnique({
+        where: { id: planId },
+    });
+
+    if (!plan) {
+        const error = new Error('Rent plan not found');
+        error.status = 404;
+        throw error;
+    }
+
+    if (plan.landlordId !== req.user.id) {
+        const error = new Error('Unauthorized');
+        error.status = 403;
+        throw error;
+    }
+
+    if (plan.status === 'completed') {
+        const error = new Error('Cannot cancel completed plan');
+        error.status = 400;
+        throw error;
+    }
+
+    const updatedPlan = await prisma.rentPlan.update({
+        where: { id: planId },
+        data: {
+            status: 'cancelled',
+        },
+        include: {
+            tenant: {
+                select: { id: true, name: true, email: true },
+            },
+            landlord: {
+                select: { id: true, name: true, email: true },
+            },
+        },
+    });
+
+    res.json({ plan: updatedPlan });
+});

@@ -1,0 +1,197 @@
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "sqlite"
+    url      = env("DATABASE_URL")
+}
+
+model User {
+    id               String                  @id @default(uuid())
+    email            String                  @unique
+    username         String                  @unique
+    password         String
+    name             String
+    role             String                  // "tenant" or "landlord"
+    points           Int                     @default(0)
+    landlordId       String?
+    propertyId       String?                 // Property tenant is assigned to
+    latePaymentCount Int                     @default(0) // Track late payments
+    landlord         User?                   @relation("LandlordTenant", fields: [landlordId], references: [id])
+    tenants          User[]                  @relation("LandlordTenant")
+    property         Property?               @relation(fields: [propertyId], references: [id])
+    bills            Bill[]                  @relation("TenantBills")
+    managedBills     Bill[]                  @relation("LandlordBills")
+    expenses         Expense[]
+    budgets          Budget[]
+    rentPlans        RentPlan[]              @relation("TenantRentPlans")
+    managedPlans     RentPlan[]              @relation("LandlordRentPlans")
+    rewards          Reward[]
+    redemptions      Redemption[]
+    conversations    Conversation[]
+    ownedProperties  Property[]              @relation("LandlordProperties")
+    createdAt        DateTime                @default(now())
+    updatedAt        DateTime                @updatedAt
+}
+
+model Bill {
+    id                String    @id @default(uuid())
+    tenantId          String
+    landlordId        String
+    type              String
+    amount            Float
+    dueDate           DateTime
+    isPaid            Boolean   @default(false)
+    paidDate          DateTime?
+    description       String?
+    stripeSessionId   String?   // Stripe Checkout Session ID
+    tenant            User      @relation("TenantBills", fields: [tenantId], references: [id])
+    landlord          User      @relation("LandlordBills", fields: [landlordId], references: [id])
+    rewards           Reward[]
+    createdAt         DateTime  @default(now())
+    updatedAt         DateTime  @updatedAt
+}
+
+model Expense {
+    id          String   @id @default(uuid())
+    tenantId    String
+    category    String
+    amount      Float
+    date        DateTime
+    description String?
+    tenant      User     @relation(fields: [tenantId], references: [id])
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+}
+
+model Budget {
+    id                String              @id @default(uuid())
+    tenantId          String
+    period            String              // "week" | "month" | "all"
+    amount            Float
+    startDate         DateTime            @default(now()) // When budget tracking started
+    daysCompleted     Int                 @default(0) // Days user has stayed under budget
+    lastCheckedDate   DateTime?           // Last time we checked if under budget
+    pointsAwarded     Boolean             @default(false) // Whether 100 points were awarded
+    tenant            User                @relation(fields: [tenantId], references: [id])
+    categoryBudgets   CategoryBudget[]
+    createdAt         DateTime            @default(now())
+    updatedAt         DateTime            @updatedAt
+
+    @@unique([tenantId, period])
+}
+
+model CategoryBudget {
+    id          String   @id @default(uuid())
+    budgetId    String
+    category    String
+    percentage  Float    // Percentage of total budget (0-100)
+    amount      Float
+    budget      Budget   @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    @@unique([budgetId, category])
+}
+
+model RentPlan {
+    id                  String         @id @default(uuid())
+    tenantId            String
+    landlordId          String
+    propertyId          String?        // Link to property
+    monthlyRent         Float
+    deposit             Float
+    duration            Int            // Duration in months
+    description         String?
+    startDate           DateTime?
+    nextDueDate         DateTime?      // When next rent is due
+    status              String         @default("pending") // pending, accepted, rejected, completed, cancelled
+    proposedDate        DateTime       @default(now())
+    reviewedDate        DateTime?
+    acceptedAt          DateTime?      // When tenant accepted (before payment)
+    completedDate       DateTime?
+    stripeSessionId     String?        // Stripe Checkout Session ID
+    paymentIntentId     String?        // Stripe Payment Intent ID
+    docusealSubmissionId String?       // DocuSeal submission ID
+    docusealSubmitterId  String?       // DocuSeal submitter ID
+    docusealSigningUrl   String?       // DocuSeal signing URL
+    docusealStatus       String?       // DocuSeal status: pending, viewed, signed, declined
+    docusealSignedAt     DateTime?     // When document was signed
+    docusealSignedPdfUrl String?       // URL to signed PDF
+    tenant              User           @relation("TenantRentPlans", fields: [tenantId], references: [id])
+    landlord            User           @relation("LandlordRentPlans", fields: [landlordId], references: [id])
+    createdAt           DateTime       @default(now())
+    updatedAt           DateTime       @updatedAt
+}
+
+model ShopItem {
+    id          String       @id @default(uuid())
+    name        String
+    description String
+    pointCost   Int
+    imageUrl    String?
+    redemptions Redemption[]
+    createdAt   DateTime     @default(now())
+    updatedAt   DateTime     @updatedAt
+}
+
+model Redemption {
+    id          String   @id @default(uuid())
+    tenantId    String
+    itemId      String
+    itemName    String
+    pointsSpent Int
+    date        DateTime @default(now())
+    tenant      User     @relation(fields: [tenantId], references: [id])
+    item        ShopItem @relation(fields: [itemId], references: [id])
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+}
+
+model Reward {
+    id           String   @id @default(uuid())
+    tenantId     String
+    billId       String
+    amount       Float
+    date         DateTime @default(now())
+    isOnTime     Boolean
+    pointsEarned Int
+    tenant       User     @relation(fields: [tenantId], references: [id])
+    bill         Bill     @relation(fields: [billId], references: [id])
+    createdAt    DateTime @default(now())
+    updatedAt    DateTime @updatedAt
+}
+
+model Conversation {
+    id        String                  @id @default(uuid())
+    userId    String
+    title     String?
+    user      User                    @relation(fields: [userId], references: [id])
+    messages  ConversationMessage[]
+    createdAt DateTime                @default(now())
+    updatedAt DateTime                @updatedAt
+}
+
+model ConversationMessage {
+    id             String       @id @default(uuid())
+    conversationId String
+    role           String       // 'user' or 'assistant'
+    content        String
+    conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+    createdAt      DateTime     @default(now())
+}
+
+model Property {
+    id              String   @id @default(uuid())
+    landlordId      String
+    name            String
+    address         String
+    units           Int      @default(1) // Number of units in property
+    monthlyRent     Float
+    description     String?
+    landlord        User     @relation("LandlordProperties", fields: [landlordId], references: [id])
+    tenants         User[]
+    createdAt       DateTime @default(now())
+    updatedAt       DateTime @updatedAt
+}
